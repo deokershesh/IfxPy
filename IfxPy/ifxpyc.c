@@ -46,6 +46,7 @@
 #include <ctype.h>
 #ifdef _WIN32
 #include <windows.h>
+//HANDLE g_Semaphore;
 #else
 #include <dlfcn.h>
 #endif
@@ -139,6 +140,45 @@ typedef struct _conn_handle_struct
 } conn_handle;
 
 static void _python_IfxPy_free_conn_struct(conn_handle *handle);
+
+//Shesh
+#define NUM_OF_SMART_TRIGGER_REGISTRATION 10
+short static gCounter = 0;
+IFMX_REGISTER_SMART_TRIGGER  gSmartTriggerRegister[NUM_OF_SMART_TRIGGER_REGISTRATION];
+IFMX_OPEN_SMART_TRIGGER      gopenSmartTrigger;
+IFMX_JOIN_SMART_TRIGGER      gJoinSmartTrigger;
+//pthread_mutex_t mutexVar;
+//static PyObject *my_callback = NULL;
+static PyObject *my_callback[NUM_OF_SMART_TRIGGER_REGISTRATION];
+typedef struct {
+	char label[129];
+	int  sessionID;
+	struct storeSessionID *next;
+} storeSessionID;
+storeSessionID *rootNode = NULL;
+
+#define MakeFunction(a,b) void a##b(const char *outBuf) \
+                         { \
+							PyObject *arglist = NULL; \
+                            arglist = Py_BuildValue("(s)", outBuf); \
+							PyObject_CallObject(my_callback[b], arglist); \
+							return; \
+                         }
+
+//The second parameter of below calls could be one less than NUM_OF_SMART_TRIGGER_REGISTRATION i.e. (NUM_OF_SMART_TRIGGER_REGISTRATION - 1)
+MakeFunction(TriggerCallback, 0)
+MakeFunction(TriggerCallback, 1)
+MakeFunction(TriggerCallback, 2)
+MakeFunction(TriggerCallback, 3)
+MakeFunction(TriggerCallback, 4)
+MakeFunction(TriggerCallback, 5)
+MakeFunction(TriggerCallback, 6)
+MakeFunction(TriggerCallback, 7)
+MakeFunction(TriggerCallback, 8)
+MakeFunction(TriggerCallback, 9)
+
+#define PrepareCallbackFunction(a, b)  a##b
+//Shesh
 
 static PyTypeObject conn_handleType = {
     PyVarObject_HEAD_INIT(NULL, 0)
@@ -382,7 +422,8 @@ char *strtoupper(char *data, int max)
 //    static void _python_IfxPy_free_conn_struct 
 static void _python_IfxPy_free_conn_struct(conn_handle *handle)
 {
-
+	storeSessionID *tempNode = NULL;
+	storeSessionID *delNode = NULL;
     // Disconnect from DB. If stmt is allocated, it is freed automatically 
     if (handle->handle_active && !handle->flag_pconnect)
     {
@@ -394,6 +435,14 @@ static void _python_IfxPy_free_conn_struct(conn_handle *handle)
         SQLFreeHandle(SQL_HANDLE_DBC, handle->hdbc);
         SQLFreeHandle(SQL_HANDLE_ENV, handle->henv);
 		handle->handle_active = 0;
+		tempNode = rootNode;
+		while (tempNode)
+		{
+			delNode = tempNode;
+			tempNode = tempNode->next;
+			free(delNode);
+			delNode = NULL;
+		}
     }
     Py_TYPE(handle)->tp_free((PyObject*)handle);
 }
@@ -492,7 +541,6 @@ static void _python_IfxPy_free_result_struct(stmt_handle* handle)
                         handle->row_data [i].data.time_val = NULL;
                     }
                     break;
-
                 case SQL_INTERVAL_DAY:
                 case SQL_INTERVAL_HOUR:
                 case SQL_INTERVAL_MINUTE:
@@ -690,6 +738,748 @@ static void _python_IfxPy_check_sql_errors(SQLHANDLE handle, SQLSMALLINT hType, 
             break;
         }
     }
+}
+
+//Shesh
+static PyObject *IfxPy_join_smart_trigger_session(PyObject *self, PyObject *args)
+{
+	PyObject *result = NULL;
+	PyObject *py_conn_res = NULL;
+	PyObject *callbackObj = NULL;
+	PyObject *sessionIDObj = NULL;
+	PyObject *ControlBackToApplicationObj = NULL;
+	int sessionID = 0;
+	char *return_str = NULL;
+	conn_handle *conn_res;
+	int rc;
+	SQLHANDLE tmpHstmt;
+	BOOL ControlBackToApplication = FALSE;
+
+
+	if (PyArg_ParseTuple(args, "OOOO", &py_conn_res, &callbackObj, &sessionIDObj, &ControlBackToApplicationObj))
+	{
+		if (!PyCallable_Check(callbackObj))
+		{
+			PyErr_SetString(PyExc_TypeError, "parameter must be callable");
+			return NULL;
+		}
+		Py_XINCREF(callbackObj);         /* Add a reference to new callback */
+		Py_XDECREF(my_callback[0]);  /* Dispose of previous callback */
+		my_callback[0] = callbackObj;       /* Remember new callback */
+										 /* Boilerplate to return "None" */
+	    //PyObject_CallObject(my_callback[0], NULL); /* Shesh: This will call the callback function of Python application */
+		Py_INCREF(Py_None);
+		result = Py_None;
+
+		if ( !PyLong_Check(sessionIDObj) )
+		{
+			PyErr_SetString(PyExc_TypeError, "Error : Session ID object should be of type int/long");
+			return NULL;
+		}
+
+		if ( !PyBool_Check(ControlBackToApplicationObj) )
+		{
+			PyErr_SetString(PyExc_TypeError, "Error : Input object should be of type Bool/Boolean");
+			return NULL;
+		}
+
+		if (!NIL_P(py_conn_res))
+		{
+			if (!PyObject_TypeCheck(py_conn_res, &conn_handleType))
+			{
+				PyErr_SetString(PyExc_Exception, "Supplied connection object Parameter is invalid");
+				return NULL;
+			}
+			else
+			{
+				conn_res = (conn_handle *)py_conn_res;
+			}
+
+			return_str = ALLOC_N(char, DB_MAX_ERR_MSG_LEN);
+			if (return_str == NULL)
+			{
+				PyErr_SetString(PyExc_Exception, "Failed to Allocate Memory");
+				return NULL;
+			}
+
+			memset(return_str, 0, DB_MAX_ERR_MSG_LEN);
+			_python_IfxPy_clear_stmt_err_cache();
+			
+			rc = SQLAllocHandle(SQL_HANDLE_STMT, conn_res->hdbc, &tmpHstmt);
+			if (rc == SQL_ERROR)
+			{
+				_python_IfxPy_check_sql_errors(conn_res->hdbc, SQL_HANDLE_DBC, rc, 1, NULL, -1, 1);
+				PyMem_Del(return_str);
+				return NULL;
+			}
+
+			if (ControlBackToApplicationObj == Py_False)
+				ControlBackToApplication = FALSE;
+			else
+				ControlBackToApplication = TRUE;
+			
+			sessionID = PyLong_AsLong(sessionIDObj);
+			printf("\n Session ID to be joined = %d\n", sessionID);
+
+			gJoinSmartTrigger.callback = TriggerCallback0; // TriggerCallback1;
+			gJoinSmartTrigger.joinSessionID = &sessionID;
+			gJoinSmartTrigger.ControlBackToApplication = &ControlBackToApplication;
+
+			rc = SQLSetStmtAttr((SQLHSTMT)tmpHstmt, SQL_INFX_ATTR_JOIN_SMART_TRIGGER, &gJoinSmartTrigger, SQL_NTS);
+			if (rc == SQL_ERROR)
+			{
+				_python_IfxPy_check_sql_errors(conn_res->hdbc, SQL_HANDLE_DBC, rc, 1, NULL, -1, 1);
+				PyMem_Del(return_str);
+				return NULL;
+			}
+			SQLFreeHandle(SQL_HANDLE_STMT, tmpHstmt);
+			result = Py_None;
+		}
+	}
+	return result;
+}
+
+static PyObject *IfxPy_delete_smart_trigger_session(PyObject *self, PyObject *args)
+{
+	PyObject *result = NULL;
+	PyObject *py_conn_res = NULL;
+	PyObject *sessionIDObj = NULL;
+	int sessionID = 0;
+	char *return_str = NULL;
+	conn_handle *conn_res;
+	int rc;
+	SQLHANDLE tmpHstmt;
+
+
+	if (PyArg_ParseTuple(args, "OO", &py_conn_res, &sessionIDObj))
+	{
+		if (!PyLong_Check(sessionIDObj))
+		{
+			PyErr_SetString(PyExc_TypeError, "Error : Session ID object should be of type int/long");
+			return NULL;
+		}
+
+		if (!NIL_P(py_conn_res))
+		{
+			if (!PyObject_TypeCheck(py_conn_res, &conn_handleType))
+			{
+				PyErr_SetString(PyExc_Exception, "Supplied connection object Parameter is invalid");
+				return NULL;
+			}
+			else
+			{
+				conn_res = (conn_handle *)py_conn_res;
+			}
+
+			return_str = ALLOC_N(char, DB_MAX_ERR_MSG_LEN);
+			if (return_str == NULL)
+			{
+				PyErr_SetString(PyExc_Exception, "Failed to Allocate Memory");
+				return NULL;
+			}
+
+			memset(return_str, 0, DB_MAX_ERR_MSG_LEN);
+			_python_IfxPy_clear_stmt_err_cache();
+			//stmt_res = _IfxPy_new_stmt_struct(conn_res);
+
+			rc = SQLAllocHandle(SQL_HANDLE_STMT, conn_res->hdbc, &tmpHstmt);
+			if (rc == SQL_ERROR)
+			{
+				_python_IfxPy_check_sql_errors(conn_res->hdbc, SQL_HANDLE_DBC, rc, 1, NULL, -1, 1);
+				PyMem_Del(return_str);
+				return NULL;
+			}
+
+			sessionID = PyLong_AsLong(sessionIDObj);
+			printf("\n Session ID to be deleted = %d\n", sessionID);
+			rc = SQLSetStmtAttr((SQLHSTMT)tmpHstmt, SQL_INFX_ATTR_DELETE_SMART_TRIGGER, &sessionID, SQL_NTS);
+			if (rc == SQL_ERROR)
+			{
+				_python_IfxPy_check_sql_errors(conn_res->hdbc, SQL_HANDLE_DBC, rc, 1, NULL, -1, 1);
+				PyMem_Del(return_str);
+				return NULL;
+			}
+			SQLFreeHandle(SQL_HANDLE_STMT, tmpHstmt);
+			result = Py_None;
+		}
+	}
+	return result;
+}
+
+static PyObject *IfxPy_get_smart_trigger_sessionID(PyObject *self, PyObject *args)
+{
+	PyObject *result = NULL;
+	PyObject *sessionIDObj = NULL;
+	char      *SessionIDString = NULL;
+	storeSessionID *tempNode = NULL;
+	BOOL found = FALSE;
+
+	if (PyArg_ParseTuple(args, "O", &sessionIDObj))
+	{
+		if (sessionIDObj != NULL && sessionIDObj != Py_None)
+		{
+			if (PyString_Check(sessionIDObj) || PyUnicode_Check(sessionIDObj))
+			{
+				sessionIDObj = PyUnicode_FromObject(sessionIDObj);
+			}
+			else
+			{
+				PyErr_SetString(PyExc_Exception, "Argument must be a string or unicode"); // ToDo
+				return NULL;
+			}
+			sessionIDObj = PyUnicode_AsASCIIString(sessionIDObj);
+			if (sessionIDObj == NULL)
+			{
+				PyErr_SetString(PyExc_Exception, "Argument must be a string or unicode"); // ToDo
+				return NULL;
+			}
+			SessionIDString = PyBytes_AsString(sessionIDObj);
+			printf("\n SessionIDString : %s\n", SessionIDString);
+			if (!rootNode)
+			{
+				PyErr_SetString(PyExc_Exception, "Unexpected null pointer found!!");
+				return NULL;
+			}
+			tempNode = rootNode;
+			while (tempNode)
+			{
+				if (strcmp(SessionIDString, tempNode->label) == 0)
+				{
+					result = PyLong_FromLong(tempNode->sessionID);
+					found = TRUE;
+					break;
+				}
+				tempNode = tempNode->next;
+			}
+			if (found == FALSE)
+			{
+				PyErr_SetString(PyExc_Exception, "The associated session ID not found for the unique string provided.");
+				return NULL;
+			}
+		}
+		else
+		{
+			PyErr_SetString(PyExc_Exception, "Argument is NULL or Py_None. It should be non-Null and should contain proper value of length not more than 128 bytes."); // ToDo
+			return NULL;
+		}
+	}
+	return result;
+}
+
+//Shesh
+static PyObject *IfxPy_open_smart_trigger(PyObject *self, PyObject *args)
+{
+	PyObject *result = NULL;
+	PyObject *py_conn_res = NULL;
+	PyObject *isDetachableObj = NULL;
+	PyObject *timeOutObj = NULL;
+	PyObject *maxRecsPerReadObj = NULL;
+	PyObject *maxPendingOperationsObj = NULL;
+	PyObject *uniqueSessionIDStringObj = NULL;
+	PyObject *reservedObj = NULL;
+	conn_handle *conn_res;
+	int rc;
+	char     *return_str = NULL; // This variable is used by _python_IfxPy_check_sql_errors to return err strings
+	BOOL     isDetachable; //Default False
+	int      timeOut; //Default 120 secs
+	short    maxRecsPerRead; //Default 1
+	int      maxPendingOperations; //Default 0
+	char     *uniqueSessionIDString;
+	char     reserved[16];
+	int      fileDesc = 0;
+	int      getSesId = 0;
+	SQLHANDLE tmpHstmt;
+	storeSessionID *tempNode = NULL;
+
+	if (PyArg_ParseTuple(args, "OOOOOO|O", &py_conn_res, &uniqueSessionIDStringObj, &isDetachableObj, &timeOutObj, &maxRecsPerReadObj, &maxPendingOperationsObj, &reservedObj)) 
+	{
+		if ( !PyBool_Check(isDetachableObj) || !PyLong_Check(timeOutObj) || !PyLong_Check(maxRecsPerReadObj) || !PyLong_Check(maxPendingOperationsObj) ) 
+		{
+			PyErr_SetString(PyExc_TypeError, "One of the paremeters is not of correct type. Recheck and try again.");
+			return NULL;
+		}
+
+		if (uniqueSessionIDStringObj != NULL && uniqueSessionIDStringObj != Py_None)
+		{
+			if (PyString_Check(uniqueSessionIDStringObj) || PyUnicode_Check(uniqueSessionIDStringObj))
+			{
+				uniqueSessionIDStringObj = PyUnicode_FromObject(uniqueSessionIDStringObj);
+			}
+			else
+			{
+				PyErr_SetString(PyExc_Exception, "Argument must be a string or unicode"); // ToDo
+				return NULL;
+			}
+			uniqueSessionIDStringObj = PyUnicode_AsASCIIString(uniqueSessionIDStringObj);
+			if (uniqueSessionIDStringObj == NULL)
+			{
+				PyErr_SetString(PyExc_Exception, "Argument must be a string or unicode"); // ToDo
+				return NULL;
+			}
+			uniqueSessionIDString = PyBytes_AsString(uniqueSessionIDStringObj);
+		}
+		else
+		{
+			PyErr_SetString(PyExc_Exception, "Argument is NULL or Py_None. It should be non-Null and should contain proper value of length not more than 128 bytes."); // ToDo
+			return NULL;
+		}
+		
+		if (!NIL_P(py_conn_res))
+		{
+			if (!PyObject_TypeCheck(py_conn_res, &conn_handleType))
+			{
+				PyErr_SetString(PyExc_Exception, "Supplied connection object Parameter is invalid");
+				return NULL;
+			}
+			else
+			{
+				conn_res = (conn_handle *)py_conn_res;
+			}
+
+			return_str = ALLOC_N(char, DB_MAX_ERR_MSG_LEN);
+			if (return_str == NULL)
+			{
+				PyErr_SetString(PyExc_Exception, "Failed to Allocate Memory");
+				return NULL;
+			}
+
+			memset(return_str, 0, DB_MAX_ERR_MSG_LEN);
+			_python_IfxPy_clear_stmt_err_cache();
+			//stmt_res = _IfxPy_new_stmt_struct(conn_res);
+
+			rc = SQLAllocHandle(SQL_HANDLE_STMT, conn_res->hdbc, &tmpHstmt);
+			if (rc == SQL_ERROR)
+			{
+				_python_IfxPy_check_sql_errors(conn_res->hdbc, SQL_HANDLE_DBC, rc, 1, NULL, -1, 1);
+				PyMem_Del(return_str);
+				return NULL;
+			}
+		
+			if (isDetachableObj == Py_False)
+				isDetachable = FALSE;
+			else
+				isDetachable = TRUE;
+
+			timeOut = PyLong_AsLong(timeOutObj);
+			maxRecsPerRead = (short)PyLong_AsLong(maxRecsPerReadObj);
+			maxPendingOperations = PyLong_AsLong(maxPendingOperationsObj);
+
+			gopenSmartTrigger.isDetachable = &isDetachable;
+			gopenSmartTrigger.maxPendingOperations = &maxPendingOperations;
+			gopenSmartTrigger.maxRecsPerRead = &maxRecsPerRead;
+			gopenSmartTrigger.timeOut = &timeOut;
+
+			rc = SQLSetStmtAttr((SQLHSTMT)tmpHstmt, SQL_INFX_ATTR_OPEN_SMART_TRIGGER, &gopenSmartTrigger, SQL_NTS);
+			if (rc == SQL_ERROR)
+			{
+				_python_IfxPy_check_sql_errors(conn_res->hdbc, SQL_HANDLE_DBC, rc, 1, NULL, -1, 1);
+				PyMem_Del(return_str);
+				return NULL;
+			}
+
+			rc = SQLGetStmtAttr((SQLHSTMT)tmpHstmt, SQL_INFX_ATTR_GET_LO_FILE_DESC_SMART_TRIGGER, (int *)&fileDesc, SQL_NTS, NULL);
+			if (rc == SQL_ERROR)
+			{
+				_python_IfxPy_check_sql_errors(conn_res->hdbc, SQL_HANDLE_DBC, rc, 1, NULL, -1, 1);
+				PyMem_Del(return_str);
+				SQLFreeHandle(SQL_HANDLE_STMT, tmpHstmt);
+				return NULL;
+			}
+			result = PyLong_FromLong(fileDesc);
+
+			rc = SQLGetStmtAttr((SQLHSTMT)tmpHstmt, SQL_INFX_ATTR_GET_SESSION_ID_SMART_TRIGGER, (int *)&getSesId, SQL_NTS, NULL);
+			if (rc == SQL_ERROR)
+			{
+				_python_IfxPy_check_sql_errors(conn_res->hdbc, SQL_HANDLE_DBC, rc, 1, NULL, -1, 1);
+				PyMem_Del(return_str);
+				SQLFreeHandle(SQL_HANDLE_STMT, tmpHstmt);
+				return NULL;
+			}
+			
+			if (!rootNode)
+			{
+				rootNode = (storeSessionID *)malloc(sizeof(storeSessionID));
+				if (!rootNode)
+				{
+					_python_IfxPy_check_sql_errors(conn_res->hdbc, SQL_HANDLE_DBC, rc, 1, NULL, -1, 1);
+					PyMem_Del(return_str);
+					SQLFreeHandle(SQL_HANDLE_STMT, tmpHstmt);
+					return NULL;
+				}
+				strcpy(rootNode->label, uniqueSessionIDString);
+				rootNode->sessionID = getSesId;
+				rootNode->next = NULL;
+			}
+			else
+			{
+				tempNode = (storeSessionID *)malloc(sizeof(storeSessionID));
+				if (!rootNode)
+				{
+					_python_IfxPy_check_sql_errors(conn_res->hdbc, SQL_HANDLE_DBC, rc, 1, NULL, -1, 1);
+					PyMem_Del(return_str);
+					SQLFreeHandle(SQL_HANDLE_STMT, tmpHstmt);
+					return NULL;
+				}
+				rootNode->next = tempNode;
+				strcpy(tempNode->label, uniqueSessionIDString);
+				tempNode->sessionID = getSesId;
+				tempNode->next = NULL;
+			}			
+			SQLFreeHandle(SQL_HANDLE_STMT, tmpHstmt);
+		}
+	}
+	return result;
+}
+
+//Shesh
+static PyObject *_python_IfxPy_register_smart_trigger_helper(PyObject *self, PyObject *args, BOOL isLoop)
+{
+	PyObject *result = Py_None; //NULL;
+	PyObject *py_conn_res = NULL;
+	PyObject *callbackObj = NULL;
+	PyObject *loFileDescriptorObj = NULL;
+	PyObject *tableNameObj = NULL;
+	PyObject *ownerNameObj = NULL;
+	PyObject *dbNameObj = NULL;
+	PyObject *sqlQueryObj = NULL;
+	PyObject *labelObj = NULL;
+	PyObject *isDeregisterObj = NULL;
+	PyObject *ControlBackToApplicationObj = NULL;
+	PyObject *reservedObj = NULL;
+	conn_handle *conn_res;
+	int rc;
+	char    *return_str = NULL; // This variable is used by _python_IfxPy_check_sql_errors to return err strings
+	int     loFileDescriptor;
+	SQLWCHAR    *tableName = NULL;
+	SQLWCHAR    *ownerName = NULL;
+	SQLWCHAR    *dbName = NULL;
+	SQLWCHAR    *sqlQuery = NULL;
+	SQLWCHAR    *label = NULL;
+	BOOL    isDeregister;
+	BOOL    ControlBackToApplication;
+	SQLWCHAR    reserved[16];
+	SQLINTEGER	    dummy = 0;
+	SQLHANDLE tmpHstmt;
+	short Counter = 0;
+	Py_ssize_t retLength = 0;
+	Py_ssize_t objectSize = 0;
+	//#ifdef _WIN32
+	//	DWORD dwWaitResult;
+	//#endif
+
+	if (PyArg_ParseTuple(args, "OOOOOOOOOO|O", &py_conn_res, &callbackObj, &loFileDescriptorObj, &tableNameObj, &ownerNameObj, &dbNameObj, &sqlQueryObj, &labelObj, &isDeregisterObj, &ControlBackToApplicationObj, &reservedObj))
+	{
+		if (!PyCallable_Check(callbackObj))
+		{
+			PyErr_SetString(PyExc_TypeError, "parameter must be callable");
+			return NULL;
+		}
+		/*
+		#ifdef _WIN32
+		dwWaitResult = WaitForSingleObject(g_Semaphore, INFINITE);
+		if (dwWaitResult != 0)
+		{
+		printf("\n dwWaitResult = %d", dwWaitResult);
+		PyErr_SetString(PyExc_Exception, "Failed to acquire semaphore lock!!");
+		return NULL;
+		}
+		*/
+		// Shesh : ToDo, Below two lines must be inside mutex.
+		Counter = gCounter;
+		gCounter++;
+		//printf("\n Counter = %d\n", Counter);
+		/*
+		ReleaseSemaphore(g_Semaphore, 1, NULL);
+		#endif
+		*/
+		if (Counter >= NUM_OF_SMART_TRIGGER_REGISTRATION)
+		{
+			PyErr_SetString(PyExc_Exception, "Can't register more than 10 events. Increase the counter (and modify associated code) to suit your need in the Python code.");
+			return NULL;
+		}
+
+		Py_XINCREF(callbackObj);         /* Add a reference to new callback */
+		Py_XDECREF(my_callback[Counter]);  /* Dispose of previous callback */
+		my_callback[Counter] = callbackObj;       /* Remember new callback */
+												  /* Boilerplate to return "None" */
+		//PyObject_CallObject(my_callback[0], NULL); /* Shesh: This will call the callback function of Python application */
+		Py_INCREF(Py_None);
+		result = Py_None;
+
+		if (!PyLong_Check(loFileDescriptorObj))
+		{
+			PyErr_SetString(PyExc_Exception, "File Description parametr should be integer");
+			return NULL;
+		}
+		if (!PyBool_Check(isDeregisterObj) || !PyBool_Check(ControlBackToApplicationObj))
+		{
+			PyErr_SetString(PyExc_TypeError, "One of the paremeters is not of boolean type. Recheck and try again.");
+			return NULL;
+		}
+		if (tableNameObj != NULL && tableNameObj != Py_None)
+		{
+			if (PyString_Check(tableNameObj) || PyUnicode_Check(tableNameObj))
+			{
+				tableNameObj = PyUnicode_FromObject(tableNameObj);
+			}
+			else
+			{
+				PyErr_SetString(PyExc_Exception, "statement must be a string or unicode");
+				return NULL;
+			}
+			//retLength = PyUnicode_GetSize(tableNameObj);
+			//objectSize = PyUnicode_GET_SIZE(tableNameObj);
+			objectSize = PyUnicode_GET_DATA_SIZE(tableNameObj);
+			tableName = (SQLWCHAR *)malloc((int)objectSize*sizeof(SQLWCHAR) + sizeof(SQLWCHAR));
+			if (tableName == NULL)
+			{
+				PyErr_SetString(PyExc_Exception, "Table name : Memory allocation failed.");
+				return NULL;
+			}
+			retLength = PyUnicode_AsWideChar(tableNameObj, tableName, objectSize);
+			if ((int)retLength < 0)
+			{
+				PyErr_SetString(PyExc_Exception, "Unicode to wide conversion failed for Table name object.");
+				return NULL;
+			}
+		}
+		if (ownerNameObj != NULL && ownerNameObj != Py_None)
+		{
+			if (PyString_Check(ownerNameObj) || PyUnicode_Check(ownerNameObj))
+			{
+				ownerNameObj = PyUnicode_FromObject(ownerNameObj);
+			}
+			else
+			{
+				PyErr_SetString(PyExc_Exception, "statement must be a string or unicode"); // ToDo
+				return NULL;
+			}
+			objectSize = PyUnicode_GET_DATA_SIZE(ownerNameObj);
+			ownerName = (SQLWCHAR *)malloc((int)objectSize * sizeof(SQLWCHAR) + sizeof(SQLWCHAR));
+			if (ownerName == NULL)
+			{
+				PyErr_SetString(PyExc_Exception, "Owner name : Memory allocation failed.");
+				return NULL;
+			}
+			retLength = PyUnicode_AsWideChar(ownerNameObj, ownerName, objectSize);
+			if ((int)retLength < 0)
+			{
+				PyErr_SetString(PyExc_Exception, "Unicode to wide conversion failed for Owner name object.");
+				return NULL;
+			}
+		}
+		if (dbNameObj != NULL && dbNameObj != Py_None)
+		{
+			if (PyString_Check(dbNameObj) || PyUnicode_Check(dbNameObj))
+			{
+				dbNameObj = PyUnicode_FromObject(dbNameObj);
+			}
+			else
+			{
+				PyErr_SetString(PyExc_Exception, "statement must be a string or unicode");
+				return NULL;
+			}
+			objectSize = PyUnicode_GET_DATA_SIZE(dbNameObj);
+			dbName = (SQLWCHAR *)malloc((int)objectSize * sizeof(SQLWCHAR) + sizeof(SQLWCHAR));
+			if (dbName == NULL)
+			{
+				PyErr_SetString(PyExc_Exception, "DB name : Memory allocation failed.");
+				return NULL;
+			}
+			retLength = PyUnicode_AsWideChar(dbNameObj, dbName, objectSize);
+			if ((int)retLength < 0)
+			{
+				PyErr_SetString(PyExc_Exception, "Unicode to wide conversion failed for Database name object.");
+				return NULL;
+			}
+		}
+		if (sqlQueryObj != NULL && sqlQueryObj != Py_None)
+		{
+			if (PyString_Check(sqlQueryObj) || PyUnicode_Check(sqlQueryObj))
+			{
+				sqlQueryObj = PyUnicode_FromObject(sqlQueryObj);
+			}
+			else
+			{
+				PyErr_SetString(PyExc_Exception, "statement must be a string or unicode");
+				return NULL;
+			}
+			objectSize = PyUnicode_GET_DATA_SIZE(sqlQueryObj);
+			sqlQuery = (SQLWCHAR *)malloc((int)objectSize * sizeof(SQLWCHAR) + sizeof(SQLWCHAR));
+			if (sqlQuery == NULL)
+			{
+				PyErr_SetString(PyExc_Exception, "SQL Query : Memory allocation failed.");
+				return NULL;
+			}
+			retLength = PyUnicode_AsWideChar(sqlQueryObj, sqlQuery, objectSize);
+			if ((int)retLength < 0)
+			{
+				PyErr_SetString(PyExc_Exception, "Unicode to wide conversion failed for SQL Query object.");
+				return NULL;
+			}
+		}
+		if (labelObj != NULL && labelObj != Py_None)
+		{
+			if (PyString_Check(labelObj) || PyUnicode_Check(labelObj))
+			{
+				labelObj = PyUnicode_FromObject(labelObj);
+			}
+			else
+			{
+				PyErr_SetString(PyExc_Exception, "Statement must be a string or unicode");
+				return NULL;
+			}
+			objectSize = PyUnicode_GET_DATA_SIZE(labelObj);
+			label = (SQLWCHAR *)malloc((int)objectSize * sizeof(SQLWCHAR) + sizeof(SQLWCHAR));
+			if (label == NULL)
+			{
+				PyErr_SetString(PyExc_Exception, "Label : Memory allocation failed.");
+				return NULL;
+			}
+			retLength = PyUnicode_AsWideChar(labelObj, label, objectSize);
+			if ((int)retLength < 0)
+			{
+				PyErr_SetString(PyExc_Exception, "Unicode to wide conversion failed for Label object.");
+				return NULL;
+			}
+		}
+
+		if (isDeregisterObj == Py_False)
+			isDeregister = FALSE;
+		else
+			isDeregister = TRUE;
+
+		if (ControlBackToApplicationObj == Py_False)
+			ControlBackToApplication = FALSE;
+		else
+			ControlBackToApplication = TRUE;
+
+		if (!NIL_P(py_conn_res))
+		{
+			if (!PyObject_TypeCheck(py_conn_res, &conn_handleType))
+			{
+				PyErr_SetString(PyExc_Exception, "Supplied connection object Parameter is invalid");
+				return NULL;
+			}
+			else
+			{
+				conn_res = (conn_handle *)py_conn_res;
+			}
+
+			return_str = ALLOC_N(char, DB_MAX_ERR_MSG_LEN);
+			if (return_str == NULL)
+			{
+				PyErr_SetString(PyExc_Exception, "Failed to Allocate Memory");
+				return NULL;
+			}
+
+			memset(return_str, 0, DB_MAX_ERR_MSG_LEN);
+			_python_IfxPy_clear_stmt_err_cache();
+			//stmt_res = _IfxPy_new_stmt_struct(conn_res);
+
+			rc = SQLAllocHandle(SQL_HANDLE_STMT, conn_res->hdbc, &tmpHstmt);
+			if (rc == SQL_ERROR)
+			{
+				_python_IfxPy_check_sql_errors(conn_res->hdbc, SQL_HANDLE_DBC, rc, 1, NULL, -1, 1);
+				PyMem_Del(return_str);
+				return NULL;
+			}
+
+			switch (Counter)
+			{
+			case 0:
+				gSmartTriggerRegister[Counter].callback = PrepareCallbackFunction(TriggerCallback, 0);
+				break;
+			case 1:
+				gSmartTriggerRegister[Counter].callback = PrepareCallbackFunction(TriggerCallback, 1);
+				break;
+			case 2:
+				gSmartTriggerRegister[Counter].callback = PrepareCallbackFunction(TriggerCallback, 2);
+				break;
+			case 3:
+				gSmartTriggerRegister[Counter].callback = PrepareCallbackFunction(TriggerCallback, 3);
+				break;
+			case 4:
+				gSmartTriggerRegister[Counter].callback = PrepareCallbackFunction(TriggerCallback, 4);
+				break;
+			case 5:
+				gSmartTriggerRegister[Counter].callback = PrepareCallbackFunction(TriggerCallback, 5);
+				break;
+			case 6:
+				gSmartTriggerRegister[Counter].callback = PrepareCallbackFunction(TriggerCallback, 6);
+				break;
+			case 7:
+				gSmartTriggerRegister[Counter].callback = PrepareCallbackFunction(TriggerCallback, 7);
+				break;
+			case 8:
+				gSmartTriggerRegister[Counter].callback = PrepareCallbackFunction(TriggerCallback, 8);
+				break;
+			case 9:
+				gSmartTriggerRegister[Counter].callback = PrepareCallbackFunction(TriggerCallback, 9);
+				break;
+			default:
+				PyErr_SetString(PyExc_Exception, "Can't register more than 10 events. Increase the counter (and modify associated code) to suit your need in the Python code.");
+				return NULL;
+			}
+			//gSmartTriggerRegister[Counter].callback = PrepareCallbackFunction(TriggerCallback, Counter); // TriggerCallback1; // my_callback;//TriggerCallback1;
+			loFileDescriptor = PyLong_AsLong(loFileDescriptorObj);
+			gSmartTriggerRegister[Counter].loFileDescriptor = &loFileDescriptor;
+			gSmartTriggerRegister[Counter].tableName = tableName;
+			gSmartTriggerRegister[Counter].ownerName = ownerName;
+			gSmartTriggerRegister[Counter].dbName = dbName;
+			gSmartTriggerRegister[Counter].sqlQuery = sqlQuery;
+			gSmartTriggerRegister[Counter].label = label;
+			gSmartTriggerRegister[Counter].isDeregister = &isDeregister;
+			gSmartTriggerRegister[Counter].ControlBackToApplication = &ControlBackToApplication;
+			
+			rc = SQLSetStmtAttrW((SQLHSTMT)tmpHstmt, SQL_INFX_ATTR_REGISTER_SMART_TRIGGER, (void *)&gSmartTriggerRegister[Counter], SQL_IS_POINTER);
+			if (rc == SQL_ERROR)
+			{
+				_python_IfxPy_check_sql_errors(conn_res->hdbc, SQL_HANDLE_DBC, rc, 1, NULL, -1, 1);
+				PyMem_Del(return_str);
+				SQLFreeHandle(SQL_HANDLE_STMT, tmpHstmt);
+				return NULL;
+			}
+
+			if (isLoop == TRUE)
+			{
+				rc = SQLGetStmtAttr((SQLHSTMT)tmpHstmt, SQL_INFX_ATTR_GET_DATA_SMART_TRIGGER_LOOP, (void *)&dummy, SQL_NTS, NULL);
+			}
+			else
+			{
+				rc = SQLGetStmtAttr((SQLHSTMT)tmpHstmt, SQL_INFX_ATTR_GET_DATA_SMART_TRIGGER_NO_LOOP, (void *)&dummy, SQL_NTS, NULL);
+			}
+			if (rc == SQL_ERROR)
+			{
+				_python_IfxPy_check_sql_errors(conn_res->hdbc, SQL_HANDLE_DBC, rc, 1, NULL, -1, 1);
+				PyMem_Del(return_str);
+				SQLFreeHandle(SQL_HANDLE_STMT, tmpHstmt);
+				return NULL;
+			}
+			result = Py_None; // PyLong_FromLong(fileDesc);
+			
+			free(tableName);
+			free(ownerName);
+			free(dbName);
+			free(sqlQuery);
+			free(label);
+
+			SQLFreeHandle(SQL_HANDLE_STMT, tmpHstmt);
+		}
+	}
+	return result;
+}
+
+//Shesh
+static PyObject *IfxPy_register_smart_trigger_no_loop(PyObject *self, PyObject *args)
+{
+	return _python_IfxPy_register_smart_trigger_helper(self, args, FALSE);
+}
+
+//Shesh
+static PyObject *IfxPy_register_smart_trigger_loop(PyObject *self, PyObject *args)
+{
+	return _python_IfxPy_register_smart_trigger_helper(self, args, TRUE);
 }
 
 /*    static int _python_IfxPy_assign_options( void *handle, int type, long opt_key, PyObject *data ) */
@@ -1220,13 +2010,11 @@ static int _python_IfxPy_bind_column_helper(stmt_handle *stmt_res)
                 PyErr_SetString(PyExc_Exception, "Failed to Allocate Memory");
                 return -1;
             }
-
             Py_BEGIN_ALLOW_THREADS;
             rc = SQLBindCol((SQLHSTMT)stmt_res->hstmt, (SQLUSMALLINT)(i + 1),
                             column_type, row_data->time_val, sizeof(SQL_INTERVAL_STRUCT),
                             (SQLLEN *)(&stmt_res->row_data [i].out_length));
             Py_END_ALLOW_THREADS;
-
             if (rc == SQL_ERROR)
             {
                 _python_IfxPy_check_sql_errors((SQLHSTMT)stmt_res->hstmt,
@@ -1234,7 +2022,6 @@ static int _python_IfxPy_bind_column_helper(stmt_handle *stmt_res)
                 return -1;
             }
             break;
-
         case SQL_BIT:
         case SQL_SMALLINT:
 
@@ -1478,6 +2265,8 @@ static PyObject *_python_IfxPy_connect_helper(PyObject *self, PyObject *args, in
         rc = SQLSetConnectAttr((SQLHDBC)conn_res->hdbc, SQL_ATTR_AUTOCOMMIT,
             (SQLPOINTER)((SQLLEN)(conn_res->auto_commit)), SQL_NTS);
 
+		// LO_AUTO
+
         conn_res->c_bin_mode = IFX_G(bin_mode);
         conn_res->c_case_mode = CASE_NATURAL;
         conn_res->c_use_wchar = WCHAR_YES;
@@ -1575,7 +2364,6 @@ static PyObject *_python_IfxPy_connect_helper(PyObject *self, PyObject *args, in
             // LO_AUTO
             rc = SQLSetConnectAttr((SQLHDBC)conn_res->hdbc, SQL_INFX_ATTR_LO_AUTOMATIC,	
                                    (SQLPOINTER)SQL_TRUE, SQL_IS_UINTEGER);
-		
             // Get the server name
             memset(server, 0, sizeof(server));
 
@@ -1621,6 +2409,13 @@ static PyObject *_python_IfxPy_connect_helper(PyObject *self, PyObject *args, in
         }
         return NULL;
     }
+/*
+//Shesh
+#ifdef _WIN32
+	// Create a semaphore with initial and max.
+	g_Semaphore = CreateSemaphore(NULL, 0, 2, NULL);
+#endif
+*/
     return (PyObject *)conn_res;
 }
 
@@ -1741,6 +2536,7 @@ static void _python_IfxPy_clear_conn_err_cache(void)
 * IfxPy.connect
 * IfxPy.autocommit
 * IfxPy.bind_param
+* IfxPy.myset_callback
 * IfxPy.close
 * IfxPy.column_privileges
 * IfxPy.columns
@@ -1806,7 +2602,7 @@ static void _python_IfxPy_clear_conn_err_cache(void)
 *
 * For an uncataloged connection to a database, database represents a complete
 * connection string in the following format:
-* DRIVER=DATABASE=database;HOST=hostname;PORT=port;
+* DRIVER={IBM DB2 ODBC DRIVER};DATABASE=database;HOSTNAME=hostname;PORT=port;
 * PROTOCOL=TCPIP;UID=username;PWD=password;
 *      where the parameters represent the following values:
 *        hostname
@@ -1877,7 +2673,7 @@ static void _python_IfxPy_clear_conn_err_cache(void)
 static PyObject *IfxPy_connect(PyObject *self, PyObject *args)
 {
     _python_IfxPy_clear_conn_err_cache();
-    return _python_IfxPy_connect_helper(self, args, 0);
+	return _python_IfxPy_connect_helper(self, args, 0);
 }
 
 
@@ -2441,6 +3237,8 @@ static PyObject *IfxPy_close(PyObject *self, PyObject *args)
     PyObject *py_conn_res = NULL;
     conn_handle *conn_res = NULL;
     int rc;
+	storeSessionID *tempNode = NULL;
+	storeSessionID *delNode = NULL;
 
     if (!PyArg_ParseTuple(args, "O", &py_conn_res))
         return NULL;
@@ -2474,6 +3272,12 @@ static PyObject *IfxPy_close(PyObject *self, PyObject *args)
             {
                 rc = SQLEndTran(SQL_HANDLE_DBC, (SQLHDBC)conn_res->hdbc,
                                 SQL_ROLLBACK);
+                if (rc == SQL_ERROR)
+                {
+                    _python_IfxPy_check_sql_errors(conn_res->hdbc, SQL_HANDLE_DBC,
+                                                    rc, 1, NULL, -1, 1);
+                    return NULL;
+                }
             }
             rc = SQLDisconnect((SQLHDBC)conn_res->hdbc);
             if (rc == SQL_SUCCESS_WITH_INFO || rc == SQL_ERROR)
@@ -2486,6 +3290,15 @@ static PyObject *IfxPy_close(PyObject *self, PyObject *args)
             {
                 return NULL;
             }
+
+			tempNode = rootNode;
+			while (tempNode)
+			{
+				delNode = tempNode;
+				tempNode = tempNode->next;
+				free(delNode);
+				delNode = NULL;
+			}
 
             Py_BEGIN_ALLOW_THREADS;
             rc = SQLFreeHandle(SQL_HANDLE_DBC, conn_res->hdbc);
@@ -5621,7 +6434,7 @@ static int _python_IfxPy_bind_data(stmt_handle *stmt_res, param_node *curr, PyOb
     case PYTHON_STRING:
         {
             char* tmp;
-            if (PyObject_CheckBuffer(bind_data) && (
+            if (PyObject_CheckBuffer(bind_data) && ( //curr->data_type == SQL_BLOB || 
                 curr->data_type == SQL_BINARY
                 || curr->data_type == SQL_VARBINARY
                 || curr->data_type == SQL_LONGVARBINARY))
@@ -5834,14 +6647,12 @@ static int _python_IfxPy_bind_data(stmt_handle *stmt_res, param_node *curr, PyOb
         curr->interval_value->intval.day_second.minute = curr->interval_value->intval.day_second.second / 60;
         curr->interval_value->intval.day_second.second -= curr->interval_value->intval.day_second.minute * 60;
         curr->interval_value->intval.day_second.fraction = 0;
-
         Py_BEGIN_ALLOW_THREADS;
         rc = SQLBindParameter(stmt_res->hstmt, curr->param_num,
                               curr->param_type, SQL_C_INTERVAL_DAY_TO_SECOND, curr->data_type, curr->param_size,
                               curr->scale, curr->interval_value, curr->ivalue, &(curr->bind_indicator));
         Py_END_ALLOW_THREADS;
         break;
-
     case PYTHON_NIL:
         curr->ivalue = SQL_NULL_DATA;
 
@@ -8207,10 +9018,8 @@ static PyObject *IfxPy_result(PyObject *self, PyObject *args)
                 PyErr_SetString(PyExc_Exception, "Failed to Allocate Memory");
                 return NULL;
             }
-
             rc = _python_IfxPy_get_data(stmt_res, col_num + 1, column_type,
                                          interval_ptr, sizeof(SQL_INTERVAL_STRUCT), &out_length);
-
             if (rc == SQL_ERROR)
             {
                 if (interval_ptr != NULL)
@@ -8221,7 +9030,6 @@ static PyObject *IfxPy_result(PyObject *self, PyObject *args)
                 PyErr_Clear();
                 Py_RETURN_FALSE;
             }
-
             if (out_length == SQL_NULL_DATA)
             {
                 PyMem_Del(interval_ptr);
@@ -8247,7 +9055,6 @@ static PyObject *IfxPy_result(PyObject *self, PyObject *args)
                 return return_value;
             }
             break;
-
         case SQL_BIT:
         case SQL_SMALLINT:
         case SQL_INTEGER:
@@ -8646,7 +9453,6 @@ static PyObject *_python_IfxPy_bind_fetch_helper(PyObject *args, int op)
                                                   row_data->interval_val->intval.day_second.second), 0);
                 }
                 break;
-
             case SQL_BIGINT:
                 value = PyLong_FromString((char *)row_data->str_val, NULL, 10);
                 break;
@@ -8694,7 +9500,6 @@ static PyObject *_python_IfxPy_bind_fetch_helper(PyObject *args, int op)
                                   PyErr_SetString(PyExc_Exception, "Failed to Allocate Memory");
                                   return NULL;
                               }
-          
                               rc = _python_IfxPy_get_data(stmt_res, column_number + 1, SQL_C_BINARY, wout_ptr,
                                   (tmp_length * sizeof(char) ), &out_length);
                               if (rc == SQL_ERROR)
@@ -8718,6 +9523,7 @@ static PyObject *_python_IfxPy_bind_fetch_helper(PyObject *args, int op)
                     }                 
                 }
                 break;
+
 
             default:
                 Py_INCREF(Py_None);
@@ -11497,9 +12303,6 @@ static int _python_get_variable_type(PyObject *variable_value)
     else return 0;
 }
 
-//////////////////////////////////////////////////////////////
-// We can use this for SPEED TEST between Py and C
-// Find the number of prime numbers between X and Y
 static PyObject *SpeedTestWithCPrimeCount(PyObject *self, PyObject *args)
 {
 	int i = 0;
@@ -11509,48 +12312,35 @@ static PyObject *SpeedTestWithCPrimeCount(PyObject *self, PyObject *args)
 	int VRange = 0;
 	int isPrime = 0;
 	int PrimeCount = 0;
-
 	//printf("\n");
 	if (!PyArg_ParseTuple(args, "ii", &x, &y))
 	{
 		return NULL;
 	}
-
 	if (x < 2)
 		x = 2;
-
 	++y;
 	for ( i=x; i<y; i++)
 	{
 		isPrime = 1;
-
 		VRange = i / 2; //This Validation Range is good enough
 		++VRange;
 		for (j=2; j<VRange; j++)
 		{
-			// Check whether it is  divisible by any number other than 1
 			if ( !(i%j) )
 			{
 				isPrime = 0;
 				break;
 			}
 		}
-
 		if (isPrime)
 		{
-			//printf(" [%d] ", i);
 			++PrimeCount;
 		}
 	}
-
 	PyObject *ret = Py_BuildValue("i", PrimeCount);
 	return ret;
 }
-
-
-//////////////////////////////////////////////////////////////
-
-
 /* Listing of IfxPy module functions: */
 static PyMethodDef IfxPy_Methods[] = {
     /* name, function, argument type, docstring */
@@ -11559,7 +12349,13 @@ static PyMethodDef IfxPy_Methods[] = {
     { "prepare", (PyCFunction)IfxPy_prepare, METH_VARARGS, "Prepares an SQL statement." },
     { "bind_param", (PyCFunction)IfxPy_bind_param, METH_VARARGS, "Binds a Python variable to an SQL statement parameter" },
     { "execute", (PyCFunction)IfxPy_execute, METH_VARARGS, "Executes an SQL statement that was prepared by IfxPy.prepare()" },
-    { "fetch_tuple", (PyCFunction)IfxPy_fetch_array, METH_VARARGS, "Returns an tuple, indexed by column position, representing a row in a result set" },
+	{ "open_smart_trigger", (PyCFunction)IfxPy_open_smart_trigger, METH_VARARGS, "Open Smart Trigger session" },
+	{ "get_smart_trigger_session_id", (PyCFunction)IfxPy_get_smart_trigger_sessionID, METH_VARARGS, "Get already opened Smart Trigger session ID" },
+	{ "join_smart_trigger_session", (PyCFunction)IfxPy_join_smart_trigger_session, METH_VARARGS, "Join already opened Smart Trigger session ID" },
+	{ "register_smart_trigger_loop", (PyCFunction)IfxPy_register_smart_trigger_loop, METH_VARARGS, "Open Smart Trigger session with loop handled by Python" },
+	{ "register_smart_trigger_no_loop", (PyCFunction)IfxPy_register_smart_trigger_no_loop, METH_VARARGS, "Open Smart Trigger session with loop handled by application" },
+	{ "delete_smart_trigger_session", (PyCFunction)IfxPy_delete_smart_trigger_session, METH_VARARGS, "Delete opened Smart Trigger session" },
+	{ "fetch_tuple", (PyCFunction)IfxPy_fetch_array, METH_VARARGS, "Returns an tuple, indexed by column position, representing a row in a result set" },
     { "fetch_assoc", (PyCFunction)IfxPy_fetch_assoc, METH_VARARGS, "Returns a dictionary, indexed by column name, representing a row in a result set" },
     { "fetch_both", (PyCFunction)IfxPy_fetch_both, METH_VARARGS, "Returns a dictionary, indexed by both column name and position, representing a row in a result set" },
     { "fetch_row", (PyCFunction)IfxPy_fetch_row, METH_VARARGS, "Sets the result set pointer to the next row or requested row" },
